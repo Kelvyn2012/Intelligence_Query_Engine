@@ -1,9 +1,12 @@
-import httpx
 import concurrent.futures
-from typing import Dict, Any
+from typing import Any, Dict
+
+import httpx
+
+from .countries import COUNTRY_NAMES
 from .exceptions import ExternalAPIException, InvalidProfileDataException
 
-API_DISPLAY_NAMES = {
+_API_LABELS = {
     "genderize": "Genderize",
     "agify": "Agify",
     "nationalize": "Nationalize",
@@ -12,10 +15,13 @@ API_DISPLAY_NAMES = {
 
 class ProfileAggregatorService:
     @staticmethod
-    def _get_age_group(age: int) -> str:
-        if age <= 12: return "child"
-        if age <= 19: return "teenager"
-        if age <= 59: return "adult"
+    def _age_group(age: int) -> str:
+        if age <= 12:
+            return "child"
+        if age <= 19:
+            return "teenager"
+        if age <= 59:
+            return "adult"
         return "senior"
 
     @classmethod
@@ -23,45 +29,56 @@ class ProfileAggregatorService:
         urls = {
             "genderize": f"https://api.genderize.io?name={name}",
             "agify": f"https://api.agify.io?name={name}",
-            "nationalize": f"https://api.nationalize.io?name={name}"
+            "nationalize": f"https://api.nationalize.io?name={name}",
         }
 
-        responses = {}
+        responses: Dict[str, Any] = {}
         with httpx.Client(timeout=10.0) as client:
             with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-                future_to_key = {executor.submit(client.get, url): key for key, url in urls.items()}
+                future_to_key = {
+                    executor.submit(client.get, url): key
+                    for key, url in urls.items()
+                }
                 for future in concurrent.futures.as_completed(future_to_key):
                     key = future_to_key[future]
-                    display_name = API_DISPLAY_NAMES[key]
+                    label = _API_LABELS[key]
                     try:
-                        response = future.result()
-                        response.raise_for_status()
-                        responses[key] = response.json()
+                        resp = future.result()
+                        resp.raise_for_status()
+                        responses[key] = resp.json()
                     except Exception:
-                        raise ExternalAPIException(f"{display_name} returned an invalid response")
+                        raise ExternalAPIException(
+                            f"{label} returned an invalid response"
+                        )
 
-        g_data = responses.get("genderize", {})
-        a_data = responses.get("agify", {})
-        n_data = responses.get("nationalize", {})
+        g = responses.get("genderize", {})
+        a = responses.get("agify", {})
+        n = responses.get("nationalize", {})
 
-        if not g_data.get("gender") or g_data.get("count", 0) == 0:
-            raise InvalidProfileDataException("Genderize returned an invalid response")
+        if not g.get("gender") or g.get("count", 0) == 0:
+            raise InvalidProfileDataException(
+                "Genderize returned insufficient data for this name"
+            )
+        if a.get("age") is None:
+            raise InvalidProfileDataException(
+                "Agify returned insufficient data for this name"
+            )
+        if not n.get("country"):
+            raise InvalidProfileDataException(
+                "Nationalize returned insufficient data for this name"
+            )
 
-        if a_data.get("age") is None:
-            raise InvalidProfileDataException("Agify returned an invalid response")
-
-        if not n_data.get("country"):
-            raise InvalidProfileDataException("Nationalize returned an invalid response")
-
-        top_country = max(n_data["country"], key=lambda c: c["probability"])
+        top_country = max(n["country"], key=lambda c: c["probability"])
+        country_code = top_country["country_id"]
 
         return {
             "name": name,
-            "gender": g_data["gender"],
-            "gender_probability": g_data["probability"],
-            "sample_size": g_data["count"],
-            "age": a_data["age"],
-            "age_group": cls._get_age_group(a_data["age"]),
-            "country_id": top_country["country_id"],
+            "gender": g["gender"],
+            "gender_probability": g["probability"],
+            "sample_size": g["count"],
+            "age": a["age"],
+            "age_group": cls._age_group(a["age"]),
+            "country_id": country_code,
+            "country_name": COUNTRY_NAMES.get(country_code, ""),
             "country_probability": top_country["probability"],
         }

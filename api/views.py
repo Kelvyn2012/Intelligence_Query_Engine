@@ -1,104 +1,163 @@
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework import status
 from django.db import IntegrityError
-from .models import Profile
-from .serializers import ProfileSerializer, ProfileListSerializer
-from .services import ProfileAggregatorService
-from .exceptions import ExternalAPIException, InvalidProfileDataException
+from rest_framework import status
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
+from .exceptions import ExternalAPIException, InvalidProfileDataException
+from .filters import build_profile_queryset
+from .models import Profile
+from .pagination import ProfilePagination
+from .parser import parse_query
+from .serializers import ProfileListSerializer, ProfileSerializer
+from .services import ProfileAggregatorService
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _error(message: str, http_status: int) -> Response:
+    return Response(
+        {"status": "error", "message": message}, status=http_status
+    )
+
+
+def _paginate(request, queryset):
+    paginator = ProfilePagination()
+    page = paginator.paginate_queryset(queryset, request)
+    serializer = ProfileListSerializer(page, many=True)
+    return paginator.get_paginated_response(serializer.data)
+
+
+# ── Views ─────────────────────────────────────────────────────────────────────
 
 class ProfileView(APIView):
+    """
+    GET  /api/profiles  — filtered, sorted, paginated list
+    POST /api/profiles  — create profile via external API aggregation
+    """
+
     def get(self, request):
         queryset = Profile.objects.all()
+        queryset, err = build_profile_queryset(queryset, request.query_params)
 
-        gender = request.query_params.get('gender')
-        country_id = request.query_params.get('country_id')
-        age_group = request.query_params.get('age_group')
+        if err:
+            return _error(err["message"], err["_status_code"])
 
-        if gender:
-            queryset = queryset.filter(gender__iexact=gender)
-        if country_id:
-            queryset = queryset.filter(country_id__iexact=country_id)
-        if age_group:
-            queryset = queryset.filter(age_group__iexact=age_group)
-
-        serializer = ProfileListSerializer(queryset, many=True)
-        return Response({
-            "status": "success",
-            "count": queryset.count(),
-            "data": serializer.data
-        }, status=status.HTTP_200_OK)
+        return _paginate(request, queryset)
 
     def post(self, request):
-        if 'name' not in request.data:
-            return Response({"status": "error", "message": "Missing 'name' field"}, status=status.HTTP_400_BAD_REQUEST)
+        if "name" not in request.data:
+            return _error("Missing 'name' field", status.HTTP_400_BAD_REQUEST)
 
-        name = request.data.get('name')
+        name = request.data.get("name")
 
-        if name == "":
-            return Response({"status": "error", "message": "Name cannot be empty"}, status=status.HTTP_400_BAD_REQUEST)
+        if name == "" or (isinstance(name, str) and not name.strip()):
+            return _error("Name cannot be empty", status.HTTP_400_BAD_REQUEST)
 
         if not isinstance(name, str):
-            return Response({"status": "error", "message": "Name must be a string"}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
+            return _error("Name must be a string", status.HTTP_422_UNPROCESSABLE_ENTITY)
 
-        normalized_name = name.strip().lower()
-        if not normalized_name:
-            return Response({"status": "error", "message": "Name cannot be only whitespace"}, status=status.HTTP_400_BAD_REQUEST)
+        normalized = name.strip().lower()
 
-        # 1. Check Idempotency
+        # Idempotency check
         try:
-            profile = Profile.objects.get(name=normalized_name)
-            return Response({
-                "status": "success",
-                "message": "Profile already exists",
-                "data": ProfileSerializer(profile).data
-            }, status=status.HTTP_200_OK)
+            profile = Profile.objects.get(name=normalized)
+            return Response(
+                {
+                    "status": "success",
+                    "message": "Profile already exists",
+                    "data": ProfileSerializer(profile).data,
+                },
+                status=status.HTTP_200_OK,
+            )
         except Profile.DoesNotExist:
             pass
 
-        # 2. Fetch and Validate External Data
+        # Fetch from external APIs
         try:
-            processed_data = ProfileAggregatorService.fetch_and_process_data(normalized_name)
-        except ExternalAPIException as e:
-            return Response({"status": "error", "message": str(e)}, status=status.HTTP_502_BAD_GATEWAY)
-        except InvalidProfileDataException as e:
-            return Response({"status": "error", "message": str(e)}, status=status.HTTP_502_BAD_GATEWAY)
+            data = ProfileAggregatorService.fetch_and_process_data(normalized)
+        except ExternalAPIException as exc:
+            return _error(str(exc), status.HTTP_502_BAD_GATEWAY)
+        except InvalidProfileDataException as exc:
+            return _error(str(exc), status.HTTP_502_BAD_GATEWAY)
         except Exception:
-            return Response({"status": "error", "message": "Unexpected error while fetching external data"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return _error(
+                "Unexpected error while fetching external data",
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
-        # 3. Handle Persistence
         try:
-            profile = Profile.objects.create(**processed_data)
-            return Response({
-                "status": "success",
-                "data": ProfileSerializer(profile).data
-            }, status=status.HTTP_201_CREATED)
+            profile = Profile.objects.create(**data)
+            return Response(
+                {"status": "success", "data": ProfileSerializer(profile).data},
+                status=status.HTTP_201_CREATED,
+            )
         except IntegrityError:
-            # Race condition handling
-            profile = Profile.objects.get(name=normalized_name)
-            return Response({
-                "status": "success",
-                "message": "Profile already exists",
-                "data": ProfileSerializer(profile).data
-            }, status=status.HTTP_200_OK)
+            profile = Profile.objects.get(name=normalized)
+            return Response(
+                {
+                    "status": "success",
+                    "message": "Profile already exists",
+                    "data": ProfileSerializer(profile).data,
+                },
+                status=status.HTTP_200_OK,
+            )
 
 
 class ProfileDetailView(APIView):
-    def get(self, request, id):
+    """
+    GET    /api/profiles/<uuid:id>
+    DELETE /api/profiles/<uuid:id>
+    """
+
+    def _get_profile(self, pk):
         try:
-            profile = Profile.objects.get(id=id)
-            return Response({
-                "status": "success",
-                "data": ProfileSerializer(profile).data
-            }, status=status.HTTP_200_OK)
+            return Profile.objects.get(id=pk), None
         except Profile.DoesNotExist:
-            return Response({"status": "error", "message": "Profile not found"}, status=status.HTTP_404_NOT_FOUND)
+            return None, _error("Profile not found", status.HTTP_404_NOT_FOUND)
+
+    def get(self, request, id):
+        profile, err = self._get_profile(id)
+        if err:
+            return err
+        return Response(
+            {"status": "success", "data": ProfileSerializer(profile).data},
+            status=status.HTTP_200_OK,
+        )
 
     def delete(self, request, id):
-        try:
-            profile = Profile.objects.get(id=id)
-            profile.delete()
-            return Response(status=status.HTTP_204_NO_CONTENT)
-        except Profile.DoesNotExist:
-            return Response({"status": "error", "message": "Profile not found"}, status=status.HTTP_404_NOT_FOUND)
+        profile, err = self._get_profile(id)
+        if err:
+            return err
+        profile.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class ProfileSearchView(APIView):
+    """
+    GET /api/profiles/search?q=<natural-language-query>
+
+    Rule-based NLP parsing — no AI, no LLMs.
+    Supports pagination via ?page=&limit= params.
+    """
+
+    def get(self, request):
+        q = request.query_params.get("q", "").strip()
+
+        if not q:
+            return _error(
+                "Missing or empty 'q' parameter", status.HTTP_400_BAD_REQUEST
+            )
+
+        filters = parse_query(q)
+        if filters is None:
+            return Response(
+                {"status": "error", "message": "Unable to interpret query"},
+                status=status.HTTP_200_OK,
+            )
+
+        queryset = Profile.objects.all()
+        queryset, err = build_profile_queryset(queryset, filters)
+        if err:
+            return _error(err["message"], err["_status_code"])
+
+        return _paginate(request, queryset)
