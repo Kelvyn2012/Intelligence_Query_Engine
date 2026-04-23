@@ -15,12 +15,11 @@ class ProfilePagination(PageNumberPagination):
             return None
 
         paginator = self.django_paginator_class(queryset, page_size)
-        page_number = self._get_page_number(request, paginator)
+        page_number = self.get_page_number(request, paginator)
 
         try:
             self.page = paginator.page(page_number)
         except InvalidPage:
-            # Clamp to last valid page so envelope stays well-formed
             last = max(paginator.num_pages, 1)
             self.page = paginator.page(last)
 
