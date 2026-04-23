@@ -9,12 +9,17 @@ class ProfilePagination(PageNumberPagination):
     page_query_param = "page"
 
     def get_paginated_response(self, data):
+        total = self.page.paginator.count
+        limit = self.get_page_size(self.request)
+        import math
+        total_pages = math.ceil(total / limit) if limit else 1
         return Response(
             {
                 "status": "success",
                 "page": self.page.number,
-                "limit": self.get_page_size(self.request),
-                "total": self.page.paginator.count,
+                "limit": limit,
+                "total": total,
+                "total_pages": total_pages,
                 "data": data,
             }
         )

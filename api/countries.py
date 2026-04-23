@@ -69,7 +69,6 @@ COUNTRY_NAMES: dict[str, str] = {
     "MX": "Mexico",
     "AR": "Argentina",
     "RU": "Russia",
-    "ZA": "South Africa",
     "PH": "Philippines",
     "PK": "Pakistan",
     "TR": "Turkey",

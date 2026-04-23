@@ -131,14 +131,12 @@ def parse_query(q: str) -> Optional[dict]:
 
     # ── "young" special token ────────────────────────────────────────────────
     if "young" in tokens:
-        filters["min_age"] = 16
-        filters["max_age"] = 24
+        filters["age_group"] = "teenager"
 
-    # ── Age phrases (may override "young" min/max if more specific) ──────────
+    # ── Age phrases (may override "young" if more specific) ──────────────────
     age_filters = _extract_ages(normalised)
-    # Only override "young" bounds if explicit age phrase is present
     if age_filters:
-        filters.update(age_filters)
+        filters.update({k: str(v) for k, v in age_filters.items()})
 
     # ── Age group ────────────────────────────────────────────────────────────
     for token, group in _AGE_GROUP_MAP.items():

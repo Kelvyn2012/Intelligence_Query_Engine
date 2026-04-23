@@ -152,7 +152,7 @@ class ProfileSearchView(APIView):
         if filters is None:
             return Response(
                 {"status": "error", "message": "Unable to interpret query"},
-                status=status.HTTP_200_OK,
+                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
             )
 
         queryset = Profile.objects.all()
